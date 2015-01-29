@@ -1,0 +1,304 @@
+#### Pierce's Disease SECI epidemic Model
+#### Developed by Adam Zeilinger, based on Zeilinger and Daugherty (2014)
+#### 2014-01-26
+
+# Load packages
+setwd("C:/Users/Adam/Documents/UC Berkeley post doc/Almeida lab")
+library(lattice)
+library(deSolve)
+library(data.table)
+
+#####################################################################
+#### Functions to produce error bars in lattice plot
+#####################################################################
+prepanel.ci <- function(x, y, ly, uy, subscripts, ...)
+{
+    y <- as.numeric(y)
+    ly <- as.numeric(ly[subscripts])
+    uy <- as.numeric(uy[subscripts])
+    list(ylim = range(y, uy, ly, finite = TRUE))
+}
+
+panel.ci <- function(x, y, ly, uy, subscripts, pch = 16, ...)
+{
+    x <- as.numeric(x)
+    y <- as.numeric(y)
+    ly <- as.numeric(ly[subscripts])
+    uy <- as.numeric(uy[subscripts])
+    panel.arrows(x, ly, x, uy, col = 'black',
+                 length = 0.1, unit = "native",
+                 angle = 90, code = 3)
+    panel.xyplot(x, y, pch = pch, ...)
+}
+
+
+######################################################################################################
+#### Define parameter estimates and uncertainties
+######################################################################################################
+
+# Generate nsim simulations, reduce number to nmin, 
+# to eliminate negative values and maintain symmetry of normal distributions
+nsim <- 10000
+nmin <- 1000 # Number of final simulations
+#### Unvarying parameters
+delta <- 0.25 # latent period; per day; no uncertainty
+dv <- rep(delta, nmin) # Vector of delta values
+gamma2 <- 0.0143; gamma1 <- 0.0119 # incubation period; per day; range -- MC uniform distribution
+gv <- runif(nmin, min = gamma1, max = gamma2) # vector of gamma values
+pm <- 0.458; pse <- 0.084 # preference; no units; mean & SE -- MC normal distr
+pv.raw <- rnorm(nsim, mean = pm, sd = pse) # Vector of preference values
+pv <- pv.raw[pv.raw >= 0][1:nmin]
+a <- 0.01 # Very little host recovery
+av <- rep(a, nmin) # Vector of a values
+
+#### Parameter estimates for WT line (susceptible)
+# Acquisition
+alphasm <- 0.222; alphasse <- 0.0321 # acquisition; probability; mean & SE -- MC normal distr
+alphasv.raw <- rnorm(nsim, mean = alphasm, sd = alphasse) # vector of alphas values
+alphasv <- alphasv.raw[alphasv.raw >= 0] # remove estimates < 0
+alphadiff <- length(alphasv.raw) - length(alphasv)
+# Remove an equal number of values in the right tail of the distribution
+alphasv2 <- alphasv[-order(alphasv)[(length(alphasv)-alphadiff):length(alphasv)]][1:nmin]
+
+# Inoculation
+betasm <- 0.0778; betasse <- 0.0161  # inoculation; probability; mean & SE -- MC normal distr
+betasv.raw <- rnorm(nsim, mean = betasm, sd = betasse) # vector of betas values
+betasv <- betasv.raw[betasv.raw >= 0] # remove estimates < 0
+betasdiff <- length(betasv.raw) - length(betasv)
+# Remove an equal number of values in the right tail of the distribution
+betasv2 <- betasv[-order(betasv)[(length(betasv)-betasdiff):length(betasv)]][1:nmin]
+
+# Vector recovery
+musm <- 0.0833; musse <- 0.0417 # vector recovery; probability; mean & SE -- MC normal distr
+musv.raw <- rnorm(nsim, mean = musm, sd = musse) # vector of mus values
+musv <- musv.raw[musv.raw >= 0] # remove estimates < 0
+musdiff <- length(musv.raw) - length(musv)
+# Remove an equal number of values in the right tail of the distribution
+musv2 <- musv[-order(musv)[(length(musv)-musdiff):length(musv)]][1:nmin]
+
+#### Parameter estimates for B line (transgenic/defended)
+# Acquisition
+alphadm <- 0.0872; alphadse <- 0.0299 # acquisition; probability; mean & SE -- MC normal distr
+alphadv.raw <- rnorm(nsim, mean = alphadm, sd = alphadse) # vector of alphad values
+alphadv <- alphadv.raw[alphadv.raw >= 0] # remove estimates < 0
+alphaddiff <- length(alphadv.raw) - length(alphadv)
+# Remove an equal number of values in the right tail of the distribution
+alphadv2 <- alphadv[-order(alphadv)[(length(alphadv)-alphaddiff):length(alphadv)]][1:nmin]
+
+# Inoculation
+betadm <- 0.0186; betadse <- 0.0120 # inoculation; probability; mean & SE
+betadv.raw <- rnorm(nsim, mean = betadm, sd = betadse) # vector of betad values
+betadv <- betadv.raw[betadv.raw >= 0] # remove estimates < 0
+betaddiff <- length(betadv.raw) - length(betadv)
+# Remove an equal number of values in the right tail of the distribution
+betadv2 <- betadv[-order(betadv)[(length(betadv)-betaddiff):length(betadv)]][1:nmin]
+
+# Vector recovery
+mudm <- 0.151; mudse <- 0.0500 # vector recovery; probability; mean & SE
+mudv.raw <- rnorm(nsim, mean = mudm, sd = mudse) # vector of mud values
+mudv <- mudv.raw[mudv.raw >= 0] # remove estimates < 0
+muddiff <- length(mudv.raw) - length(mudv)
+# Remove an equal number of values in the right tail of the distribution
+mudv2 <- mudv[-order(mudv)[(length(mudv)-muddiff):length(mudv)]][1:nmin]
+
+## Combining vectors of parameter values
+# Parameter values for HxfB (GE) scenario
+parsDataGE1 <- matrix(cbind(alphadv2, betadv2, dv, gv, 
+                           mudv2, pv, av), ncol = 7)
+
+# Parameter values for susceptible (WT) scenario
+parsDataWT1 <- matrix(cbind(alphasv2, betasv2, dv, gv, 
+                           musv2, pv, av), ncol = 7)
+
+#### State variable starting values
+S = 100; S = 100; E = 0; E = 0
+C = 0; C = 0; I = 0; I = 0
+U = 199; V = 1
+N = S + E + C + I
+M = U + V
+
+
+##########################################################################################
+#### Numerical simulation
+##########################################################################################
+# Equations for SECI model
+PDSECIModel <- function(Time, State, Pars){
+  with(as.list(c(State, Pars)), {
+    # Defended patch
+    dS <- a*(E + C + I) - (beta*S*V)/(p*I + S + E + C)
+    dE <- (beta*S*V)/(p*I + S + E + C) - (delta + a)*E
+    dC <- delta*E - a*C - gamma*C
+    dI <- gamma*C - a*I
+    dU <- mu*V - (alpha*p*I*U)/(p*I + S + E + C) - (alpha*C*U)/(p*I + S + E + C)
+    dV <- (alpha*p*I*U)/(p*I + S + E + C) + (alpha*C*U)/(p*I + S + E + C) - mu*V
+    return(list(c(dS, dE, dC, dI, dU, dV)))
+  })
+}
+
+## Function to run simulations and output infective host (I) and infectious vector (V) densities
+PDsimFunc1 <- function(x){
+  Pars <- c(alpha = x[1], beta = x[2], delta = x[3], gamma = x[4], 
+            mu = x[5], p = x[6], a = x[7])
+  State <- c(S = S, E = E, C = C, I = I, U = U, V = V)
+  Time <- seq(0, 1500, by = 2) # time steps to 1500 by 2
+  model.out <- as.data.frame(ode(func = PDSECIModel,
+                                 y = State,
+                                 parms = Pars,
+                                 times = Time))
+  model.dat <- data.frame(model.out$time, model.out$I, model.out$V)
+  return(model.dat)
+}
+
+
+######################################################################################
+#### Simulation with GE scenario
+######################################################################################
+# Run simulation
+PDsimGE1List <- apply(parsDataGE1, 1, PDsimFunc1)
+# Combine lists into a single data.frame
+PDsimGE1 <- as.data.frame(rbindlist(PDsimGE1List))
+names(PDsimGE1) <- c("time", "I", "V")
+# Calculate mean and SE for each time point and combine into a single data.frame
+meanGE1 <- aggregate(PDsimGE1[,-1], by = list(PDsimGE1$time), mean)
+## 95% credible intervals
+ciuGE1 <- aggregate(PDsimGE1[,-1], by = list(PDsimGE1$time), function(x) quantile(x, 0.975))
+names(ciuGE1) <- c("time", paste(names(ciuGE1)[-1], "CIU", sep = "."))
+cilGE1 <- aggregate(PDsimGE1[,-1], by = list(PDsimGE1$time), function(x) quantile(x, 0.0275))
+names(cilGE1) <- c("time", paste(names(cilGE1)[-1], "CIL", sep = "."))
+plotGE1 <- cbind(meanGE1, ciuGE1[,-1], cilGE1[,-1])
+plotGE1 <- plotGE1[,order(names(plotGE1))]
+names(plotGE1)[1] <- "time"
+
+
+#######################################################################################
+#### Simulation with WT scenario
+#######################################################################################
+# Run simulation
+PDsimWT1List <- apply(parsDataWT1, 1, PDsimFunc1)
+# Combine lists into a single data.frame
+PDsimWT1 <- as.data.frame(rbindlist(PDsimWT1List))
+names(PDsimWT1) <- c("time", "I", "V")
+# Calculate mean and SE for each time point and combine into a single data.frame
+meanWT1 <- aggregate(PDsimWT1[,-1], by = list(PDsimWT1$time), mean)
+## 95% credible intervals
+ciuWT1 <- aggregate(PDsimWT1[,-1], by = list(PDsimWT1$time), function(x) quantile(x, 0.975))
+names(ciuWT1) <- c("time", paste(names(ciuWT1)[-1], "CIU", sep = "."))
+cilWT1 <- aggregate(PDsimWT1[,-1], by = list(PDsimWT1$time), function(x) quantile(x, 0.0275))
+names(cilWT1) <- c("time", paste(names(cilWT1)[-1], "CIL", sep = "."))
+plotWT1 <- cbind(meanWT1, ciuWT1[,-1], cilWT1[,-1])
+plotWT1 <- plotWT1[,order(names(plotWT1))]
+names(plotWT1)[1] <- "time"
+
+
+#### Plot WT and GE results together
+plotWTGE1 <- data.frame(plotWT1[,1:4], plotGE1[,2:4])
+
+tiff(file = "Transgenic vs WT single patch--Host results.tif")
+  matplot(plotWTGE1[,-1], type = "l", 
+          col = c("green", "black", "black", "green", "black", "black"), 
+          lty = c(1,1,1,2,2,2), lwd = c(2,1,1,2,1,1),
+          xlim = c(0,600), ylim = c(0,60),
+          xlab = "Time", ylab = "% of hosts infected", cex.axis = 1.5, cex.lab = 1.5)
+  legend("right", c("WT", "HxfB", "95% CI (WT)", "95% CI (HxfB)"), 
+         col = c("green", "green", "black", "black"), 
+         lty = c(1,2,1,2), lwd = c(2,2,1,1))
+dev.off()
+
+
+#####################################################################
+#### R0 for SECI model
+#####################################################################
+#### R0 equation as function
+R0func <- function(alpha, a, beta, gamma, delta, mu, p, N = 100, M = 200){
+  R0 <- sqrt((alpha*beta*delta*(a + gamma*p)*M)/(a*mu*(a + delta)*(a + gamma)*N))
+  return(R0)
+}
+
+# Distribution of R0 values for conventional (WT) patch
+R0Ctrl <- R0func(alphasv2, av, betasv2, gv, dv, musv2, pv, 100, 200)
+# Distribution of R0 values for transgenic (B line) patch
+R0Trans <- R0func(alphadv2, av, betadv2, gv, dv, mudv2, pv, 100, 200)
+
+#### Plot R0 results
+# Combine Ctrl and Transgenic results
+R0plot <- data.frame("trt" = c("Ctrl", "Trans"),
+                     "est" = c(median(R0Ctrl), median(R0Trans)),
+                     "cil" = c(quantile(R0Ctrl, 0.0275), quantile(R0Trans, 0.0275)),
+                     "ciu" = c(quantile(R0Ctrl, 0.975), quantile(R0Trans, 0.975)))
+
+tiff(filename = "SECI R0 plot 2015-01-16.tif") 
+  with(R0plot,
+       xyplot(est~trt, groups = trt,
+              ly = cil, uy = ciu,
+              scales = list(col = 1, alternating = 1, tck = c(1, 0), 
+                            x = list(cex = 1.3, labels = c("WT", "HxfB")),
+                            y = list(limits = c(0, 14), cex = 1.3,
+                                     at = seq(0, 14, by = 2))
+              ),
+              xlab = list("Grape genotype", cex = 1.5), 
+              ylab = list(expression("R"[0]), cex = 1.5),
+              layout = c(1,1), pch = c(16), cex = 1.5,
+              type = 'p', aspect = 1, col = "black",
+              prepanel = prepanel.ci,                      
+              panel = function(x, y, ...) {                
+                panel.abline(v = unique(as.numeric(x)),  
+                             col = "white")              
+                panel.superpose(x, y, ...)               
+              },                                          
+              panel.groups = panel.ci))
+  trellis.focus("panel",1,1)
+  panel.abline(h = 1, lty = 2)
+  trellis.unfocus()
+dev.off()
+
+
+##########################################################################
+#### Sensitivity analysis of R0 to changes in vector density
+##########################################################################
+# vector of insect vector densities
+Mv <- seq(0, 200, by = 1)
+
+#### Calculate R0 over a range of vector densities for GE plants
+R0FuncGE <- function(x){
+  R0 <- R0func(alphadv2, av, betadv2, gv, dv, mudv2, pv, N = 100, M = x)
+  return(data.frame(x, R0))
+}
+R0GEList <- lapply(Mv, R0FuncGE)
+R0GEData <- as.data.frame(rbindlist(R0GEList))
+names(R0GEData) <- c("M", "R0")
+
+#### Calculate R0 over a range of vector densities for WT plants
+R0FuncWT <- function(x){
+  R0 <- R0func(alphasv2, av, betasv2, gv, dv, musv2, pv, N = 100, M = x)
+  return(data.frame(x, R0))
+}
+R0WTList <- lapply(Mv, R0FuncWT)
+R0WTData <- as.data.frame(rbindlist(R0WTList))
+names(R0WTData) <- c("M", "R0")
+
+# Combine data sets and calculate medians and 95% CI
+R0data <- cbind(R0WTData, R0GEData$R0)
+names(R0data) <- c("M", "R0.WT", "R0.GE")
+R0medians <- aggregate(R0data[,2:3], by = list(R0data$M), median)
+R0ciu <- aggregate(R0data[,2:3], by = list(R0data$M), function(x) quantile(x, 0.975))
+R0cil <- aggregate(R0data[,2:3], by = list(R0data$M), function(x) quantile(x, 0.0275))
+
+# Plot R0 vs M
+R0plot <- cbind(R0medians, R0cil[,2:3], R0ciu[,2:3])
+names(R0plot) <- c("M", "WTmedian", "GEmedian", "WTcil", "GEcil", "WTciu", "GEciu")
+
+tiff(file = "R0 vs vector density.tif")
+  matplot(R0plot[,2:7], type = "l", 
+          col = c("green", "green", "black", "black", "black", "black"), 
+          lty = c(1,2), lwd = c(2,2,1,1,1,1),
+          ylim = c(0,12),
+          xlab = "Vector density (M)", 
+          ylab = expression("R"[0]),
+          cex.axis = 1.3, cex.lab = 1.5)
+  legend("topleft", c("WT", "HxfB", "95% CI (WT)", "95% CI (HxfB)"), 
+         col = c("green", "green", "black", "black"), 
+         lty = c(1,2,1,2), lwd = c(2,2,1,1))
+  abline(h = 1, lty = 3)
+dev.off()
+
+
