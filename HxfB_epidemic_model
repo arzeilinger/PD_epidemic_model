@@ -3,7 +3,6 @@
 #### 2014-01-26
 
 # Load packages
-setwd("C:/Users/Adam/Documents/UC Berkeley post doc/Almeida lab")
 library(lattice)
 library(deSolve)
 library(data.table)
